@@ -172,7 +172,7 @@ let fireParticles = [];
 
 // ── Config ─────────────────────────────────────────────────────
 async function loadConfig() {
-  const res = await fetch('/effects.json');
+  const res = await fetch('./effects.json');
   config = await res.json();
 }
 
