@@ -1,0 +1,51 @@
+{
+  "effects": {
+    "portal": {
+      "name": "Doctor Strange Portal",
+      "description": "Mystical golden ring portal with sparks",
+      "colors": {
+        "primary": "#FFD700",
+        "secondary": "#FF8C00",
+        "spark": "#FFF5CC",
+        "glow": "rgba(255, 200, 0, 0.6)",
+        "inner": "rgba(0, 120, 255, 0.3)",
+        "core": "rgba(100, 180, 255, 0.5)"
+      },
+      "rings": 3,
+      "sparkCount": 40,
+      "rotationSpeed": 2.5,
+      "glowIntensity": 30,
+      "pulseSpeed": 0.05
+    },
+    "fireball": {
+      "name": "Fireball",
+      "description": "Raging inferno fireball",
+      "colors": {
+        "core": "#FFFFFF",
+        "inner": "#FFFF00",
+        "mid": "#FF6600",
+        "outer": "#FF0000",
+        "ember": "#FF4500",
+        "smoke": "rgba(80, 40, 20, 0.4)"
+      },
+      "particleCount": 80,
+      "turbulence": 3.5,
+      "coreSize": 0.25,
+      "glowRadius": 60,
+      "flameHeight": 1.4
+    }
+  },
+  "handDetection": {
+    "modelComplexity": 1,
+    "minDetectionConfidence": 0.7,
+    "minTrackingConfidence": 0.6,
+    "maxHands": 2,
+    "singleHandThreshold": 1
+  },
+  "ui": {
+    "showLandmarks": false,
+    "debugMode": false,
+    "effectScale": 1.0,
+    "palmFollowSmoothing": 0.15
+  }
+}

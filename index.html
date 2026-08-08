@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Magic Hands</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      overflow: hidden;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #fff;
+    }
+
+    #container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    #webcam {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+      opacity: 0.82;
+    }
+
+    #effect-canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #title {
+      font-size: 1rem;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.35);
+      font-weight: 300;
+    }
+
+    #status-pill {
+      padding: 6px 22px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      transition: all 0.4s ease;
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.07);
+      color: rgba(255,255,255,0.35);
+    }
+    #status-pill.portal {
+      background: rgba(255,185,0,0.18);
+      color: #FFD700;
+      border-color: rgba(255,185,0,0.4);
+      box-shadow: 0 0 22px rgba(255,185,0,0.25);
+    }
+    #status-pill.fireball {
+      background: rgba(255,70,0,0.18);
+      color: #FF6600;
+      border-color: rgba(255,70,0,0.4);
+      box-shadow: 0 0 22px rgba(255,70,0,0.25);
+    }
+
+    #hint {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.2);
+      letter-spacing: 0.1em;
+      z-index: 20;
+      white-space: nowrap;
+    }
+
+    #loading-screen {
+      position: fixed;
+      inset: 0;
+      background: #000;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      transition: opacity 0.8s ease;
+    }
+    #loading-screen.hidden { opacity: 0; pointer-events: none; }
+    .load-ring {
+      width: 56px; height: 56px;
+      border: 3px solid rgba(255,185,0,0.15);
+      border-top-color: #FFD700;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #load-text {
+      color: rgba(255,255,255,0.35);
+      font-size: 0.8rem;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+
+<div id="loading-screen">
+  <div class="load-ring"></div>
+  <div id="load-text">Loading Hand Model…</div>
+</div>
+
+<div id="container">
+  <video id="webcam" autoplay muted playsinline></video>
+  <canvas id="effect-canvas"></canvas>
+
+  <div id="hud">
+    <div id="title">✦ Magic Hands ✦</div>
+    <div id="status-pill">NO HANDS DETECTED</div>
+  </div>
+
+  <div id="hint">1 HAND → 🔥 FIREBALL &nbsp;·&nbsp; 2 HANDS → 🌀 RING PORTALS</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<script>
+// ── State ──────────────────────────────────────────────────────
+let config = null;
+let handsDetected = 0;
+let handData = []; // [{x, y}, ...]  — smoothed positions per hand
+
+// Per-hand smooth targets
+let targets  = [{x: 0, y: 0}, {x: 0, y: 0}];
+let smoothed = [{x: 0, y: 0}, {x: 0, y: 0}];
+
+const canvas = document.getElementById('effect-canvas');
+const ctx    = document.getElementById('effect-canvas').getContext('2d');
+const video  = document.getElementById('webcam');
+const pill   = document.getElementById('status-pill');
+const loadSc = document.getElementById('loading-screen');
+
+let t = 0;
+// Portal sparks per hand
+let sparks = [[], []];
+// Fireball particles (only one hand active)
+let fireParticles = [];
+
+// ── Config ─────────────────────────────────────────────────────
+async function loadConfig() {
+  const res = await fetch('/effects.json');
+  config = await res.json();
+}
+
+// ── Canvas resize ──────────────────────────────────────────────
+function resizeCanvas() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ── Status pill ────────────────────────────────────────────────
+function updateStatus(count) {
+  if (count === 0) {
+    pill.textContent = 'NO HANDS DETECTED';
+    pill.className = '';
+  } else if (count === 1) {
+    pill.textContent = '🔥 FIREBALL';
+    pill.className = 'fireball';
+  } else {
+    pill.textContent = '🌀 RING PORTALS';
+    pill.className = 'portal';
+  }
+}
+
+// ── Palm center from MediaPipe landmarks ───────────────────────
+function getPalmCenter(lm) {
+  const pts = [0, 5, 9, 13, 17];
+  let sx = 0, sy = 0;
+  pts.forEach(i => { sx += lm[i].x; sy += lm[i].y; });
+  return { x: sx / pts.length, y: sy / pts.length };
+}
+
+function lmToCanvas(norm) {
+  return {
+    x: (1 - norm.x) * canvas.width,   // mirror X
+    y: norm.y * canvas.height,
+  };
+}
+
+// ── Smooth lerp ───────────────────────────────────────────────
+const SMOOTH = 0.18;
+function lerpPos(cur, tgt) {
+  cur.x += (tgt.x - cur.x) * SMOOTH;
+  cur.y += (tgt.y - cur.y) * SMOOTH;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  PORTAL RING  (one ring per hand)
+// ═══════════════════════════════════════════════════════════════
+function createSpark() {
+  return {
+    angle:       Math.random() * Math.PI * 2,
+    radius:      88 + Math.random() * 28,
+    speed:       (Math.random() * 0.045 + 0.01) * (Math.random() < 0.5 ? 1 : -1),
+    size:        Math.random() * 3 + 1,
+    life:        Math.random(),
+    maxLife:     Math.random() * 0.8 + 0.4,
+    orbitOffset: (Math.random() - 0.5) * 14,
+  };
+}
+
+function ensureSparks(idx, count) {
+  while (sparks[idx].length < count) sparks[idx].push(createSpark());
+}
+
+function drawPortal(x, y, sparkArr, cfg) {
+  const baseR = 92;
+  const pulse = 1 + Math.sin(t * cfg.pulseSpeed * 60) * 0.045;
+  const r = baseR * pulse;
+
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Outer ambient halo
+  const halo = ctx.createRadialGradient(0, 0, r * 0.5, 0, 0, r * 1.8);
+  halo.addColorStop(0,   'rgba(255,180,0,0.13)');
+  halo.addColorStop(0.6, 'rgba(255,100,0,0.05)');
+  halo.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(0, 0, r * 1.8, 0, Math.PI * 2); ctx.fill();
+
+  // Blue portal void
+  const void_ = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 0.76);
+  void_.addColorStop(0,   'rgba(160,220,255,0.38)');
+  void_.addColorStop(0.55,'rgba(50,110,255,0.22)');
+  void_.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.fillStyle = void_;
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.76, 0, Math.PI * 2); ctx.fill();
+
+  // Three spinning dashed rings
+  const rings = [
+    { r: r,        w: 5.5, rot:  t * cfg.rotationSpeed,        dash: [13, 7]  },
+    { r: r * 0.84, w: 3,   rot: -t * cfg.rotationSpeed * 1.35, dash: [7, 11]  },
+    { r: r * 1.13, w: 2,   rot:  t * cfg.rotationSpeed * 0.65, dash: [22, 14] },
+  ];
+  rings.forEach(ring => {
+    ctx.save();
+    ctx.rotate(ring.rot);
+    ctx.shadowBlur  = cfg.glowIntensity;
+    ctx.shadowColor = cfg.colors.primary;
+    ctx.strokeStyle = cfg.colors.primary;
+    ctx.lineWidth   = ring.w;
+    ctx.setLineDash(ring.dash);
+    ctx.beginPath(); ctx.arc(0, 0, ring.r, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  });
+
+  // Orbiting sparks
+  sparkArr.forEach((sp, i) => {
+    sp.angle += sp.speed;
+    sp.life  += 0.016;
+    if (sp.life > sp.maxLife) { sparkArr[i] = createSpark(); return; }
+    const fade = Math.sin((sp.life / sp.maxLife) * Math.PI);
+    const sr   = sp.radius * pulse + sp.orbitOffset * Math.sin(sp.life * 3);
+    ctx.shadowBlur  = 7;
+    ctx.shadowColor = '#FFF5CC';
+    ctx.fillStyle   = `rgba(255,245,180,${fade * 0.9})`;
+    ctx.beginPath();
+    ctx.arc(Math.cos(sp.angle) * sr, Math.sin(sp.angle) * sr, sp.size * fade, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  FIREBALL
+// ═══════════════════════════════════════════════════════════════
+function createFireParticle(x, y) {
+  const angle = Math.random() * Math.PI * 2;
+  const speed = Math.random() * 3.8 + 0.7;
+  return {
+    x, y,
+    vx:     Math.cos(angle) * speed,
+    vy:     Math.sin(angle) * speed - Math.random() * 2.2,
+    life:   1.0,
+    decay:  Math.random() * 0.024 + 0.011,
+    size:   Math.random() * 24 + 8,
+    isEmber: Math.random() < 0.18,
+  };
+}
+
+function drawFireball(x, y, cfg) {
+  // Spawn new particles each frame
+  for (let i = 0; i < 6; i++) fireParticles.push(createFireParticle(x, y));
+
+  // Outer glow
+  ctx.save();
+  const glowG = ctx.createRadialGradient(x, y, 0, x, y, cfg.glowRadius * 1.9);
+  glowG.addColorStop(0,   'rgba(255,130,0,0.32)');
+  glowG.addColorStop(0.45,'rgba(255,40,0,0.12)');
+  glowG.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.fillStyle = glowG;
+  ctx.beginPath(); ctx.arc(x, y, cfg.glowRadius * 1.9, 0, Math.PI * 2); ctx.fill();
+
+  // Particles
+  fireParticles = fireParticles.filter(p => p.life > 0);
+  fireParticles.forEach(p => {
+    p.x   += p.vx + (Math.random() - 0.5) * cfg.turbulence;
+    p.y   += p.vy + (Math.random() - 0.5) * cfg.turbulence;
+    p.life -= p.decay;
+    p.size *= 0.972;
+
+    let color;
+    const a = p.life;
+    if (p.isEmber)      color = `rgba(255,110,0,${a * 0.85})`;
+    else if (a > 0.70)  color = `rgba(255,255,190,${a})`;
+    else if (a > 0.45)  color = `rgba(255,165,0,${a})`;
+    else if (a > 0.20)  color = `rgba(255,50,0,${a})`;
+    else                color = `rgba(70,25,8,${a * 0.45})`;
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.shadowBlur  = p.isEmber ? 10 : 22;
+    ctx.shadowColor = p.isEmber ? '#FF4500' : '#FF6600';
+    ctx.fillStyle   = color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Bright white-hot core
+  ctx.globalCompositeOperation = 'lighter';
+  const coreG = ctx.createRadialGradient(x, y, 0, x, y, 40);
+  coreG.addColorStop(0,   'rgba(255,255,255,0.96)');
+  coreG.addColorStop(0.22,'rgba(255,255,160,0.82)');
+  coreG.addColorStop(0.55,'rgba(255,110,0,0.45)');
+  coreG.addColorStop(1,   'rgba(255,0,0,0)');
+  ctx.fillStyle = coreG;
+  ctx.beginPath(); ctx.arc(x, y, 40, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  RENDER LOOP
+// ═══════════════════════════════════════════════════════════════
+function render() {
+  t += 0.016;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (!config) { requestAnimationFrame(render); return; }
+
+  const count = handsDetected;
+
+  if (count === 1) {
+    // ── ONE HAND → FIREBALL ──
+    lerpPos(smoothed[0], targets[0]);
+    drawFireball(smoothed[0].x, smoothed[0].y, config.effects.fireball);
+    // let any leftover portal sparks fade
+    sparks[0] = []; sparks[1] = [];
+
+  } else if (count === 2) {
+    // ── TWO HANDS → RING PORTALS ──
+    fireParticles = fireParticles.filter(p => { p.life -= 0.06; return p.life > 0; });
+    // Draw decaying fire particles so it doesn't snap away
+    fireParticles.forEach(p => {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(255,80,0,${p.life * 0.35})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size * 0.4, 0, Math.PI * 2); ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+    });
+
+    for (let h = 0; h < 2; h++) {
+      lerpPos(smoothed[h], targets[h]);
+      ensureSparks(h, config.effects.portal.sparkCount);
+      drawPortal(smoothed[h].x, smoothed[h].y, sparks[h], config.effects.portal);
+    }
+
+  } else {
+    // ── NO HANDS → fade everything out ──
+    fireParticles = fireParticles.filter(p => { p.life -= 0.05; return p.life > 0; });
+    fireParticles.forEach(p => {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(255,70,0,${p.life * 0.3})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size * 0.35, 0, Math.PI * 2); ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+    });
+    sparks[0] = []; sparks[1] = [];
+  }
+
+  requestAnimationFrame(render);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MEDIAPIPE HANDS
+// ═══════════════════════════════════════════════════════════════
+async function initHandTracking() {
+  const hands = new Hands({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+  });
+
+  hands.setOptions({
+    maxNumHands:              2,
+    modelComplexity:          1,
+    minDetectionConfidence:   0.72,
+    minTrackingConfidence:    0.62,
+  });
+
+  hands.onResults(results => {
+    const lms = results.multiHandLandmarks || [];
+    handsDetected = lms.length;
+    updateStatus(handsDetected);
+
+    lms.forEach((lm, i) => {
+      if (i > 1) return;
+      const palm = getPalmCenter(lm);
+      const cv   = lmToCanvas(palm);
+      targets[i].x = cv.x;
+      targets[i].y = cv.y;
+      // Snap on first detection
+      if (smoothed[i].x === 0 && smoothed[i].y === 0) {
+        smoothed[i].x = cv.x;
+        smoothed[i].y = cv.y;
+      }
+    });
+  });
+
+  const camera = new Camera(video, {
+    onFrame: async () => { await hands.send({ image: video }); },
+    width: 1280, height: 720,
+  });
+
+  await camera.start();
+  setTimeout(() => loadSc.classList.add('hidden'), 900);
+  render();
+}
+
+// ── Boot ──────────────────────────────────────────────────────
+(async () => {
+  await loadConfig();
+  await initHandTracking();
+})();
+</script>
+</body>
+</html>
